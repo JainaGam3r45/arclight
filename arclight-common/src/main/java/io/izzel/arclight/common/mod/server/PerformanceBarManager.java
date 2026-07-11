@@ -53,7 +53,7 @@ public final class PerformanceBarManager {
 
     private static void registerPermission(String name) {
         if (Bukkit.getPluginManager().getPermission(name) == null) {
-            Bukkit.getPluginManager().addPermission(new Permission(name, PermissionDefault.FALSE));
+            Bukkit.getPluginManager().addPermission(new Permission(name, PermissionDefault.OP));
         }
     }
 
