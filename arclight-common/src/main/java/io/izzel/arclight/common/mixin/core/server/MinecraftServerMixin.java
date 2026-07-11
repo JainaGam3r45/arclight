@@ -97,7 +97,7 @@ public abstract class MinecraftServerMixin extends ReentrantBlockableEventLoop<T
 
     // @formatter:off
     @Shadow private int tickCount;
-    @Shadow protected abstract boolean initServer() throws IOException;
+    @Shadow(aliases = "m_7038_") protected abstract boolean initServer() throws IOException;
     @Shadow protected long nextTickTime;
     @Shadow private ServerStatus status;
     @Shadow @Nullable private String motd;
