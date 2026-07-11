@@ -18,12 +18,15 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Coerce;
 import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import org.spongepowered.asm.mixin.injection.callback.LocalCapture;
 
 import java.io.IOException;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -35,7 +38,14 @@ public abstract class PersistentEntitySectionManagerMixin<T extends EntityAccess
     @Shadow @Final private EntityPersistentStorage<T> permanentStorage;
     @Shadow @Final EntitySectionStorage<T> sectionStorage;
     @Shadow @Final private Long2ObjectMap<PersistentEntitySectionManager.ChunkLoadStatus> chunkLoadStatuses;
+    @Shadow @Final private static org.slf4j.Logger LOGGER;
     // @formatter:on
+
+    @Unique private static final long ARCLIGHT_DUPLICATE_UUID_REPORT_INTERVAL_MS = 60_000L;
+    @Unique private final Set<Long> arclight$duplicateEntityChunks = new HashSet<>();
+    @Unique private boolean arclight$processingPendingLoads;
+    @Unique private int arclight$discardedDuplicateEntities;
+    @Unique private long arclight$lastDuplicateUuidReport;
 
     public void close(boolean save) throws IOException {
         if (save) {
@@ -52,6 +62,58 @@ public abstract class PersistentEntitySectionManagerMixin<T extends EntityAccess
 
     public boolean isPending(long cord) {
         return this.chunkLoadStatuses.get(cord) == PersistentEntitySectionManager.ChunkLoadStatus.PENDING;
+    }
+
+    @Inject(method = "processPendingLoads", at = @At("HEAD"))
+    private void arclight$beginDuplicateUuidCleanup(CallbackInfo ci) {
+        this.arclight$processingPendingLoads = true;
+    }
+
+    @Redirect(method = "m_157557_", at = @At(value = "INVOKE", target = "Lorg/slf4j/Logger;warn(Ljava/lang/String;Ljava/lang/Object;)V"), remap = false)
+    private void arclight$recordDuplicateUuid(org.slf4j.Logger logger, String message, Object entity) {
+        if (this.arclight$processingPendingLoads && entity instanceof EntityAccess entityAccess) {
+            this.arclight$duplicateEntityChunks.add(ChunkPos.asLong(entityAccess.blockPosition()));
+            this.arclight$discardedDuplicateEntities++;
+            return;
+        }
+        logger.warn(message, entity);
+    }
+
+    @Inject(method = "processPendingLoads", at = @At("TAIL"))
+    private void arclight$cleanDuplicateUuidChunks(CallbackInfo ci) {
+        this.arclight$processingPendingLoads = false;
+        for (long chunk : this.arclight$duplicateEntityChunks) {
+            this.arclight$storeEntitiesWithoutDuplicates(chunk);
+        }
+        this.arclight$duplicateEntityChunks.clear();
+        this.arclight$reportDuplicateUuids(false);
+    }
+
+    @Inject(method = "close", at = @At("HEAD"))
+    private void arclight$reportPendingDuplicateUuids(CallbackInfo ci) {
+        this.arclight$reportDuplicateUuids(true);
+    }
+
+    @Unique
+    private void arclight$storeEntitiesWithoutDuplicates(long chunk) {
+        List<T> entities = this.sectionStorage.getExistingSectionsInChunk(chunk)
+            .flatMap(EntitySection::getEntities)
+            .collect(Collectors.toList());
+        this.permanentStorage.storeEntities(new ChunkEntities<>(new ChunkPos(chunk), entities));
+    }
+
+    @Unique
+    private void arclight$reportDuplicateUuids(boolean force) {
+        if (this.arclight$discardedDuplicateEntities == 0) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (!force && now - this.arclight$lastDuplicateUuidReport < ARCLIGHT_DUPLICATE_UUID_REPORT_INTERVAL_MS) {
+            return;
+        }
+        LOGGER.warn("Discarded {} duplicate entity UUIDs while loading chunks; affected chunks were saved without the duplicate entities", this.arclight$discardedDuplicateEntities);
+        this.arclight$discardedDuplicateEntities = 0;
+        this.arclight$lastDuplicateUuidReport = now;
     }
 
     @Unique private boolean arclight$fireEvent = false;
