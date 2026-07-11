@@ -20,6 +20,9 @@ public class AsyncCatcherSpec {
     @Setting("overrides")
     private Map<String, Operation> overrides;
 
+    @Setting("log-overrides")
+    private Map<String, LogLevel> logOverrides;
+
     public boolean isDump() {
         return dump;
     }
@@ -36,7 +39,15 @@ public class AsyncCatcherSpec {
         return overrides;
     }
 
+    public Map<String, LogLevel> getLogOverrides() {
+        return logOverrides;
+    }
+
     public enum Operation {
         NONE, DISPATCH, BLOCK, EXCEPTION
+    }
+
+    public enum LogLevel {
+        OFF, DEBUG, WARN
     }
 }

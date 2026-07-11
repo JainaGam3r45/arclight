@@ -33,6 +33,7 @@ import java.io.InputStreamReader;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -52,6 +53,7 @@ public class AsyncCatcher implements Implementer {
     private final boolean dump;
     private final boolean warn;
     private final AsyncCatcherSpec.Operation defaultOp;
+    private final Map<String, AsyncCatcherSpec.LogLevel> logOverrides;
     private final Map<String, Map<String, String>> reasons;
     private final ClassLoader classLoader;
 
@@ -64,6 +66,8 @@ public class AsyncCatcher implements Implementer {
         this.defaultOp = ArclightConfig.spec().getAsyncCatcher().getDefaultOp();
         this.dump = ArclightConfig.spec().getAsyncCatcher().isDump();
         this.warn = ArclightConfig.spec().getAsyncCatcher().isWarn();
+        Map<String, AsyncCatcherSpec.LogLevel> logOverrides = ArclightConfig.spec().getAsyncCatcher().getLogOverrides();
+        this.logOverrides = logOverrides == null ? Collections.emptyMap() : logOverrides;
         this.classLoader = Thread.currentThread().getContextClassLoader();
     }
 
@@ -230,8 +234,11 @@ public class AsyncCatcher implements Implementer {
 
     @SuppressWarnings("unchecked")
     public static <T> CallbackInfoReturnable<T> checkOp(Supplier<T> method, AsyncCatcherSpec.Operation operation, String reason, Executor executor) throws Throwable {
-        if (INSTANCE.warn) {
+        AsyncCatcherSpec.LogLevel logLevel = INSTANCE.logOverrides.getOrDefault(reason, INSTANCE.warn ? AsyncCatcherSpec.LogLevel.WARN : AsyncCatcherSpec.LogLevel.OFF);
+        if (logLevel == AsyncCatcherSpec.LogLevel.WARN) {
             ArclightImplementer.LOGGER.warn(MARKER, "Async " + reason);
+        } else if (logLevel == AsyncCatcherSpec.LogLevel.DEBUG) {
+            ArclightImplementer.LOGGER.debug(MARKER, "Async " + reason);
         }
         IllegalStateException exception = new IllegalStateException("Asynchronous " + reason + "!");
         if (INSTANCE.dump) {
