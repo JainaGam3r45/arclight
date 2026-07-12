@@ -45,8 +45,9 @@ public abstract class PersistentEntitySectionManagerMixin<T extends EntityAccess
 
     @Unique private static final long ARCLIGHT_DUPLICATE_UUID_REPORT_INTERVAL_MS = 60_000L;
     @Unique private final Set<Long> arclight$duplicateEntityChunks = new HashSet<>();
-    @Unique private boolean arclight$processingPendingLoads;
-    @Unique private int arclight$discardedDuplicateEntities;
+    @Unique private int arclight$chunkEntityLoadDepth;
+    @Unique private int arclight$regeneratedDuplicateEntities;
+    @Unique private int arclight$rejectedDuplicateEntities;
     @Unique private long arclight$lastDuplicateUuidReport;
 
     public void close(boolean save) throws IOException {
@@ -66,14 +67,14 @@ public abstract class PersistentEntitySectionManagerMixin<T extends EntityAccess
         return this.chunkLoadStatuses.get(cord) == PersistentEntitySectionManager.ChunkLoadStatus.PENDING;
     }
 
-    @Inject(method = "processPendingLoads", at = @At("HEAD"))
+    @Inject(method = {"processPendingLoads", "addLegacyChunkEntities", "addWorldGenChunkEntities"}, at = @At("HEAD"))
     private void arclight$beginDuplicateUuidCleanup(CallbackInfo ci) {
-        this.arclight$processingPendingLoads = true;
+        this.arclight$chunkEntityLoadDepth++;
     }
 
     @Inject(method = "m_157557_", at = @At("HEAD"), cancellable = true, remap = false)
     private void arclight$regenerateDuplicateUuid(T entity, CallbackInfoReturnable<Boolean> cir) {
-        if (!this.arclight$processingPendingLoads || !(entity instanceof Entity minecraftEntity) || !this.knownUuids.contains(entity.getUUID())) {
+        if (this.arclight$chunkEntityLoadDepth == 0 || !(entity instanceof Entity minecraftEntity) || !this.knownUuids.contains(entity.getUUID())) {
             return;
         }
         UUID uuid;
@@ -83,13 +84,22 @@ public abstract class PersistentEntitySectionManagerMixin<T extends EntityAccess
         minecraftEntity.setUUID(uuid);
         this.knownUuids.add(uuid);
         this.arclight$duplicateEntityChunks.add(ChunkPos.asLong(entity.blockPosition()));
-        this.arclight$discardedDuplicateEntities++;
+        this.arclight$regeneratedDuplicateEntities++;
         cir.setReturnValue(true);
     }
 
-    @Inject(method = "processPendingLoads", at = @At("TAIL"))
+    @Redirect(method = "m_157557_", remap = false, at = @At(value = "INVOKE", target = "Lorg/slf4j/Logger;warn(Ljava/lang/String;Ljava/lang/Object;)V", remap = false))
+    private void arclight$summarizeRejectedDuplicateUuid(org.slf4j.Logger logger, String message, Object entity) {
+        this.arclight$rejectedDuplicateEntities++;
+        logger.debug(message, entity);
+    }
+
+    @Inject(method = {"processPendingLoads", "addLegacyChunkEntities", "addWorldGenChunkEntities"}, at = @At("TAIL"))
     private void arclight$cleanDuplicateUuidChunks(CallbackInfo ci) {
-        this.arclight$processingPendingLoads = false;
+        this.arclight$chunkEntityLoadDepth--;
+        if (this.arclight$chunkEntityLoadDepth != 0) {
+            return;
+        }
         for (long chunk : this.arclight$duplicateEntityChunks) {
             this.arclight$storeEntitiesWithoutDuplicates(chunk);
         }
@@ -112,15 +122,17 @@ public abstract class PersistentEntitySectionManagerMixin<T extends EntityAccess
 
     @Unique
     private void arclight$reportDuplicateUuids(boolean force) {
-        if (this.arclight$discardedDuplicateEntities == 0) {
+        if (this.arclight$regeneratedDuplicateEntities == 0 && this.arclight$rejectedDuplicateEntities == 0) {
             return;
         }
         long now = System.currentTimeMillis();
         if (!force && now - this.arclight$lastDuplicateUuidReport < ARCLIGHT_DUPLICATE_UUID_REPORT_INTERVAL_MS) {
             return;
         }
-        LOGGER.info("Regenerated {} duplicate entity UUIDs while loading chunks", this.arclight$discardedDuplicateEntities);
-        this.arclight$discardedDuplicateEntities = 0;
+        LOGGER.info("Handled duplicate entity UUIDs: {} regenerated during chunk loading, {} rejected outside chunk loading",
+            this.arclight$regeneratedDuplicateEntities, this.arclight$rejectedDuplicateEntities);
+        this.arclight$regeneratedDuplicateEntities = 0;
+        this.arclight$rejectedDuplicateEntities = 0;
         this.arclight$lastDuplicateUuidReport = now;
     }
 
