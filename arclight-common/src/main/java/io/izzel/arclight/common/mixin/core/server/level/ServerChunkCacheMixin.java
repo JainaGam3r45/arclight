@@ -27,7 +27,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
-import java.util.function.BooleanSupplier;
 
 @Mixin(ServerChunkCache.class)
 public abstract class ServerChunkCacheMixin implements ServerChunkProviderBridge {
@@ -101,12 +100,12 @@ public abstract class ServerChunkCacheMixin implements ServerChunkProviderBridge
     }
 
     @Inject(method = "tickChunks", at = @At("HEAD"))
-    private void arclight$beginSpawnBudget(BooleanSupplier hasTimeLeft, CallbackInfo ci) {
+    private void arclight$beginSpawnBudget(CallbackInfo ci) {
         EntityGenerationManager.beginWorldTick(this.level);
     }
 
     @Inject(method = "tickChunks", at = @At("RETURN"))
-    private void arclight$endSpawnBudget(BooleanSupplier hasTimeLeft, CallbackInfo ci) {
+    private void arclight$endSpawnBudget(CallbackInfo ci) {
         EntityGenerationManager.endWorldTick();
     }
 
