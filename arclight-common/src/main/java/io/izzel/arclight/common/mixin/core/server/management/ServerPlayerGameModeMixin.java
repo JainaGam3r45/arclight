@@ -3,6 +3,7 @@ package io.izzel.arclight.common.mixin.core.server.management;
 import io.izzel.arclight.common.bridge.core.entity.player.ServerPlayerEntityBridge;
 import io.izzel.arclight.common.bridge.core.server.management.PlayerInteractionManagerBridge;
 import io.izzel.arclight.common.mod.ArclightMod;
+import io.izzel.arclight.common.mod.server.DropManager;
 import io.izzel.arclight.common.mod.util.ArclightCaptures;
 import net.minecraft.advancements.CriteriaTriggers;
 import net.minecraft.core.BlockPos;
@@ -91,6 +92,10 @@ public abstract class ServerPlayerGameModeMixin implements PlayerInteractionMana
     @Overwrite
     public void handleBlockBreakAction(BlockPos blockPos, ServerboundPlayerActionPacket.Action action, Direction direction, int i, int j) {
         if (!this.level.hasChunkAt(blockPos)) {
+            return;
+        }
+        if (DropManager.protectsBlock(this.player, blockPos)) {
+            this.player.connection.send(new ClientboundBlockUpdatePacket(blockPos, this.level.getBlockState(blockPos)));
             return;
         }
         net.minecraftforge.event.entity.player.PlayerInteractEvent.LeftClickBlock forgeEvent = net.minecraftforge.common.ForgeHooks.onLeftClickBlock(player, blockPos, direction, action);
@@ -289,6 +294,9 @@ public abstract class ServerPlayerGameModeMixin implements PlayerInteractionMana
     public InteractionResult useItemOn(ServerPlayer playerIn, Level worldIn, ItemStack stackIn, InteractionHand handIn, BlockHitResult blockRaytraceResultIn) {
         BlockPos blockpos = blockRaytraceResultIn.getBlockPos();
         BlockState blockstate = worldIn.getBlockState(blockpos);
+        if (DropManager.blocksInteraction(playerIn, blockpos)) {
+            return InteractionResult.FAIL;
+        }
         // InteractionResult resultType = InteractionResult.PASS;
         {   // compatible with questadditions
             // these variables are not available inside next if block
@@ -346,6 +354,7 @@ public abstract class ServerPlayerGameModeMixin implements PlayerInteractionMana
                 resultType = blockstate.use(worldIn, playerIn, handIn, blockRaytraceResultIn);
                 if (resultType.consumesAction()) {
                     CriteriaTriggers.ITEM_USED_ON_BLOCK.trigger(playerIn, blockpos, itemstack);
+                    DropManager.chestOpened(playerIn, blockpos);
                     return resultType;
                 }
             }

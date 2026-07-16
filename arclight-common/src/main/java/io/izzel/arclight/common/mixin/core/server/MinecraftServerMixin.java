@@ -8,6 +8,7 @@ import io.izzel.arclight.common.bridge.core.world.WorldBridge;
 import io.izzel.arclight.common.mod.ArclightConstants;
 import io.izzel.arclight.common.mod.server.BukkitRegistry;
 import io.izzel.arclight.common.mod.server.PerformanceBarManager;
+import io.izzel.arclight.common.mod.server.DropManager;
 import io.izzel.arclight.common.mod.util.ArclightCaptures;
 import io.izzel.arclight.common.mod.util.BukkitOptionParser;
 import it.unimi.dsi.fastutil.longs.LongIterator;
@@ -254,6 +255,7 @@ public abstract class MinecraftServerMixin extends ReentrantBlockableEventLoop<T
                 this.profiler.push("tick");
                 this.tickServer(this::haveTime);
                 PerformanceBarManager.tick((MinecraftServer) (Object) this);
+                DropManager.tick((MinecraftServer) (Object) this);
                 this.profiler.popPush("nextTickWait");
                 this.mayHaveDelayedTasks = true;
                 this.delayedTasksMaxNextTickTime = Math.max(Util.getMillis() + 50L, this.nextTickTime);
@@ -281,6 +283,7 @@ public abstract class MinecraftServerMixin extends ReentrantBlockableEventLoop<T
         } finally {
             try {
                 PerformanceBarManager.clear();
+                DropManager.clearBossBar();
                 this.stopped = true;
                 this.stopServer();
             } catch (Throwable throwable) {
