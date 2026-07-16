@@ -5,9 +5,11 @@ import io.izzel.arclight.common.bridge.core.world.server.ChunkHolderBridge;
 import io.izzel.arclight.common.bridge.core.world.server.ChunkMapBridge;
 import io.izzel.arclight.common.bridge.core.world.server.ServerChunkProviderBridge;
 import io.izzel.arclight.common.bridge.core.world.server.TicketManagerBridge;
+import io.izzel.arclight.common.mod.server.spawn.EntityGenerationManager;
 import net.minecraft.server.level.*;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameRules;
+import net.minecraft.world.level.NaturalSpawner;
 import net.minecraft.world.level.chunk.ChunkGenerator;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.storage.LevelData;
@@ -18,8 +20,10 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.gen.Accessor;
 import org.spongepowered.asm.mixin.gen.Invoker;
 import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
 import org.spongepowered.asm.mixin.injection.Redirect;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
@@ -93,6 +97,23 @@ public abstract class ServerChunkCacheMixin implements ServerChunkProviderBridge
         long gameTime = worldInfo.getGameTime();
         long ticksPer = ((WorldBridge) this.level).bridge$ticksPerSpawnCategory().getLong(SpawnCategory.ANIMAL);
         return (ticksPer != 0L && gameTime % ticksPer == 0) ? 0 : 1;
+    }
+
+    @Inject(method = "tickChunks", at = @At("HEAD"))
+    private void arclight$beginSpawnBudget(CallbackInfo ci) {
+        EntityGenerationManager.beginWorldTick(this.level);
+    }
+
+    @Inject(method = "tickChunks", at = @At("RETURN"))
+    private void arclight$endSpawnBudget(CallbackInfo ci) {
+        EntityGenerationManager.endWorldTick();
+    }
+
+    @Redirect(method = "tickChunks", at = @At(value = "INVOKE", target = "Lnet/minecraft/world/level/NaturalSpawner;spawnForChunk(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/level/chunk/LevelChunk;Lnet/minecraft/world/level/NaturalSpawner$SpawnState;ZZZ)V"))
+    private void arclight$budgetedNaturalSpawn(ServerLevel level, LevelChunk chunk, NaturalSpawner.SpawnState state, boolean friendly, boolean hostile, boolean rare) {
+        if (EntityGenerationManager.tryConsumeNaturalSpawn(level, chunk)) {
+            NaturalSpawner.spawnForChunk(level, chunk, state, friendly, hostile, rare);
+        }
     }
 
     public void close(boolean save) throws IOException {
