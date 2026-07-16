@@ -184,6 +184,11 @@ public abstract class PlayerListMixin implements PlayerListBridge {
         return player.serverLevel();
     }
 
+    @Inject(method = "placeNewPlayer", at = @At("TAIL"))
+    private void arclight$restorePersistentBars(Connection connection, ServerPlayer player, CallbackInfo ci) {
+        PerformanceBarManager.restore(player);
+    }
+
     @Inject(method = "save", cancellable = true, at = @At("HEAD"))
     private void arclight$returnIfNotPersist(ServerPlayer playerIn, CallbackInfo ci) {
         if (!((ServerPlayerEntityBridge) playerIn).bridge$isPersist()) {

@@ -17,6 +17,7 @@ import org.bukkit.ChatColor;
 import org.bukkit.boss.BarColor;
 import org.bukkit.boss.BarStyle;
 import org.bukkit.boss.BossBar;
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.permissions.Permission;
@@ -25,6 +26,7 @@ import org.bukkit.permissions.PermissionDefault;
 import java.io.File;
 import java.io.IOException;
 import java.util.Collection;
+import java.util.EnumSet;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.Locale;
@@ -34,6 +36,7 @@ import java.util.UUID;
 public final class PerformanceBarManager {
 
     private static final Map<UUID, EnumMap<BarType, BossBar>> BARS = new HashMap<>();
+    private static final Map<UUID, EnumSet<BarType>> ENABLED = new HashMap<>();
     private static BarSettings tpsSettings = BarSettings.tpsDefaults();
     private static BarSettings ramSettings = BarSettings.ramDefaults();
     private static long ticks;
@@ -58,25 +61,90 @@ public final class PerformanceBarManager {
     }
 
     public static void reloadConfiguration() {
-        File file = new File("bukkit.yml");
-        YamlConfiguration config = YamlConfiguration.loadConfiguration(file);
-        tpsSettings = BarSettings.load(config, "arclight-bars.tpsbar", BarSettings.tpsDefaults());
-        ramSettings = BarSettings.load(config, "arclight-bars.rambar", BarSettings.ramDefaults());
+        migrateLegacyConfiguration();
+        YamlConfiguration config = ArclightConfiguration.reload();
+        tpsSettings = BarSettings.load(config, "performance-bars.tpsbar", BarSettings.tpsDefaults());
+        ramSettings = BarSettings.load(config, "performance-bars.rambar", BarSettings.ramDefaults());
+        loadEnabled(config);
         try {
-            config.save(file);
-        } catch (IOException exception) {
+            ArclightConfiguration.save();
+        } catch (IllegalStateException exception) {
             Bukkit.getLogger().warning("Unable to save Arclight performance bar settings: " + exception.getMessage());
         }
         updateAll(ArclightServer.getMinecraftServer());
     }
 
+    private static void migrateLegacyConfiguration() {
+        File legacyFile = new File("bukkit.yml");
+        YamlConfiguration legacy = YamlConfiguration.loadConfiguration(legacyFile);
+        if (!ArclightConfiguration.copySection(legacy, "arclight-bars", "performance-bars")) {
+            return;
+        }
+        legacy.set("arclight-bars", null);
+        try {
+            legacy.save(legacyFile);
+            ArclightConfiguration.save();
+        } catch (IOException exception) {
+            Bukkit.getLogger().warning("Unable to migrate Arclight performance bar settings: " + exception.getMessage());
+        }
+    }
+
+    private static void loadEnabled(YamlConfiguration config) {
+        ENABLED.clear();
+        ConfigurationSection players = config.getConfigurationSection("performance-bars.player-state");
+        if (players == null) {
+            return;
+        }
+        for (String playerId : players.getKeys(false)) {
+            try {
+                UUID uuid = UUID.fromString(playerId);
+                EnumSet<BarType> types = EnumSet.noneOf(BarType.class);
+                for (BarType type : BarType.values()) {
+                    if (players.getBoolean(playerId + "." + type.command, false)) {
+                        types.add(type);
+                    }
+                }
+                if (!types.isEmpty()) {
+                    ENABLED.put(uuid, types);
+                }
+            } catch (IllegalArgumentException ignored) {
+            }
+        }
+    }
+
     public static void tick(MinecraftServer server) {
-        if (BARS.isEmpty()) {
+        if (BARS.isEmpty() && ENABLED.isEmpty()) {
             return;
         }
         ticks++;
         if (ticks % tpsSettings.tickInterval == 0 || ticks % ramSettings.tickInterval == 0) {
+            restoreOnlinePlayers(server);
             updateAll(server);
+        }
+    }
+
+    public static void restore(ServerPlayer player) {
+        if (ENABLED.containsKey(player.getUUID())) {
+            restore(player, player.server);
+        }
+    }
+
+    private static void restoreOnlinePlayers(MinecraftServer server) {
+        for (UUID uuid : ENABLED.keySet()) {
+            ServerPlayer player = server.getPlayerList().getPlayer(uuid);
+            if (player != null) {
+                restore(player, server);
+            }
+        }
+    }
+
+    private static void restore(ServerPlayer player, MinecraftServer server) {
+        EnumSet<BarType> types = ENABLED.get(player.getUUID());
+        if (types == null) {
+            return;
+        }
+        for (BarType type : types) {
+            show(player, type, server);
         }
     }
 
@@ -132,18 +200,52 @@ public final class PerformanceBarManager {
         BossBar current = playerBars.remove(type);
         if (current != null) {
             current.removeAll();
+            setEnabled(player.getUniqueId(), type, false);
             if (playerBars.isEmpty()) {
                 BARS.remove(player.getUniqueId());
             }
             source.sendSuccess(() -> Component.literal(type.displayName + " bar disabled for " + player.getName()), false);
             return;
         }
+        setEnabled(player.getUniqueId(), type, true);
+        show(target, type, source.getServer());
+        source.sendSuccess(() -> Component.literal(type.displayName + " bar enabled for " + player.getName()), false);
+    }
+
+    private static void show(ServerPlayer target, BarType type, MinecraftServer server) {
+        Player player = ((ServerPlayerEntityBridge) target).bridge$getBukkitEntity();
+        EnumMap<BarType, BossBar> bars = BARS.computeIfAbsent(player.getUniqueId(), key -> new EnumMap<>(BarType.class));
+        if (bars.containsKey(type)) {
+            return;
+        }
         BarSettings settings = settings(type);
         BossBar bar = Bukkit.createBossBar(settings.title, settings.good, settings.style);
         bar.addPlayer(player);
-        playerBars.put(type, bar);
-        update(player, type, bar, source.getServer());
-        source.sendSuccess(() -> Component.literal(type.displayName + " bar enabled for " + player.getName()), false);
+        bars.put(type, bar);
+        update(player, type, bar, server);
+    }
+
+    private static void setEnabled(UUID playerId, BarType type, boolean enabled) {
+        EnumSet<BarType> types = ENABLED.computeIfAbsent(playerId, key -> EnumSet.noneOf(BarType.class));
+        if (enabled) {
+            types.add(type);
+        } else {
+            types.remove(type);
+            if (types.isEmpty()) {
+                ENABLED.remove(playerId);
+            }
+        }
+        YamlConfiguration config = ArclightConfiguration.get();
+        String path = "performance-bars.player-state." + playerId + "." + type.command;
+        config.set(path, enabled ? true : null);
+        if (!enabled && !config.contains("performance-bars.player-state." + playerId)) {
+            config.set("performance-bars.player-state." + playerId, null);
+        }
+        try {
+            ArclightConfiguration.save();
+        } catch (IllegalStateException exception) {
+            Bukkit.getLogger().warning("Unable to save Arclight performance bar state: " + exception.getMessage());
+        }
     }
 
     private static void updateAll(MinecraftServer server) {
@@ -189,8 +291,12 @@ public final class PerformanceBarManager {
                 }
                 default -> throw new IllegalStateException("Unexpected TPS bar fill mode");
             }
-            color = tpsSettings.colorFor(good, medium);
-            title = tpsSettings.colorize(format(tpsSettings.title, tps, mspt, ping, 0L, 0L, 0.0), good, medium);
+            boolean msptGood = mspt <= 40.0;
+            boolean msptMedium = mspt <= 50.0;
+            boolean pingGood = ping <= 100;
+            boolean pingMedium = ping <= 200;
+            color = tpsSettings.colorFor(good && msptGood && pingGood, medium && msptMedium && pingMedium);
+            title = formatTpsTitle(tpsSettings, tps, mspt, ping, good, medium, msptGood, msptMedium, pingGood, pingMedium);
             bar.setColor(color);
         } else {
             Runtime runtime = Runtime.getRuntime();
@@ -199,7 +305,7 @@ public final class PerformanceBarManager {
             progress = maximum == 0 ? 0.0 : 1.0 - (double) used / maximum;
             boolean good = progress >= 0.5;
             boolean medium = progress >= 0.25;
-            title = ramSettings.colorize(format(ramSettings.title, 0.0, 0.0, 0, used, maximum, (1.0 - progress) * 100.0), good, medium);
+            title = formatRamTitle(ramSettings, used, maximum, (1.0 - progress) * 100.0, good, medium);
             bar.setColor(ramSettings.colorFor(good, medium));
         }
         double clamped = clamp(progress);
@@ -211,13 +317,18 @@ public final class PerformanceBarManager {
         return type == BarType.TPS ? tpsSettings : ramSettings;
     }
 
-    private static String format(String title, double tps, double mspt, int ping, long used, long maximum, double percent) {
-        return title.replace("<tps>", String.format(Locale.ROOT, "%.2f", tps))
-            .replace("<mspt>", String.format(Locale.ROOT, "%.2f", mspt))
-            .replace("<ping>", Integer.toString(ping))
-            .replace("<used>", formatMemory(used))
+    private static String formatTpsTitle(BarSettings settings, double tps, double mspt, int ping, boolean tpsGood, boolean tpsMedium, boolean msptGood, boolean msptMedium, boolean pingGood, boolean pingMedium) {
+        return settings.title
+            .replace("<tps>", settings.metric(String.format(Locale.ROOT, "%.2f", tps), tpsGood, tpsMedium))
+            .replace("<mspt>", settings.metric(String.format(Locale.ROOT, "%.2f", mspt), msptGood, msptMedium))
+            .replace("<ping>", settings.metric(Integer.toString(ping), pingGood, pingMedium));
+    }
+
+    private static String formatRamTitle(BarSettings settings, long used, long maximum, double percent, boolean good, boolean medium) {
+        return settings.title
+            .replace("<used>", settings.metric(formatMemory(used), good, medium))
             .replace("<xmx>", formatMemory(maximum))
-            .replace("<percent>", String.format(Locale.ROOT, "%.1f%%", percent));
+            .replace("<percent>", settings.metric(String.format(Locale.ROOT, "%.1f%%", percent), good, medium));
     }
 
     private static String formatMemory(long bytes) {
@@ -250,20 +361,20 @@ public final class PerformanceBarManager {
     private record BarSettings(String title, BarStyle style, FillMode fillMode, BarColor good, BarColor medium, BarColor low, String goodText, String mediumText, String lowText, int tickInterval) {
 
         private static BarSettings tpsDefaults() {
-            return new BarSettings("TPS: <tps> MSPT: <mspt> Ping: <ping>ms", BarStyle.SEGMENTED_20, FillMode.MSPT, BarColor.GREEN, BarColor.YELLOW, BarColor.RED, "&a<text>", "&e<text>", "&c<text>", 20);
+            return new BarSettings("&7TPS: <tps> &7MSPT: <mspt> &7Ping: <ping>ms", BarStyle.SEGMENTED_20, FillMode.MSPT, BarColor.GREEN, BarColor.YELLOW, BarColor.RED, "&a<text>", "&e<text>", "&c<text>", 20);
         }
 
         private static BarSettings ramDefaults() {
-            return new BarSettings("RAM: <used>/<xmx> (<percent>)", BarStyle.SEGMENTED_20, FillMode.MSPT, BarColor.GREEN, BarColor.YELLOW, BarColor.RED, "&a<text>", "&e<text>", "&c<text>", 20);
+            return new BarSettings("&7RAM: <used>&7/<xmx> &7(<percent>)", BarStyle.SEGMENTED_20, FillMode.MSPT, BarColor.GREEN, BarColor.YELLOW, BarColor.RED, "&a<text>", "&e<text>", "&c<text>", 20);
         }
 
         private static BarSettings load(YamlConfiguration config, String path, BarSettings defaults) {
             setDefault(config, path + ".title", defaults.title);
             String title = config.getString(path + ".title", defaults.title);
-            if (path.endsWith("tpsbar") && title.equals("&7TPS&6: &f<tps> &7MSPT&6: &f<mspt> &7Ping&6: &f<ping>ms")) {
+            if (path.endsWith("tpsbar") && (title.equals("&7TPS&6: &f<tps> &7MSPT&6: &f<mspt> &7Ping&6: &f<ping>ms") || title.equals("TPS: <tps> MSPT: <mspt> Ping: <ping>ms"))) {
                 title = defaults.title;
                 config.set(path + ".title", title);
-            } else if (path.endsWith("rambar") && title.equals("&7RAM&6: &f<used>/<xmx> &7(<percent>)")) {
+            } else if (path.endsWith("rambar") && (title.equals("&7RAM&6: &f<used>/<xmx> &7(<percent>)") || title.equals("RAM: <used>/<xmx> (<percent>)"))) {
                 title = defaults.title;
                 config.set(path + ".title", title);
             }
@@ -294,7 +405,7 @@ public final class PerformanceBarManager {
             return isGood ? good : isMedium ? medium : low;
         }
 
-        private String colorize(String text, boolean isGood, boolean isMedium) {
+        private String metric(String text, boolean isGood, boolean isMedium) {
             String format = isGood ? goodText : isMedium ? mediumText : lowText;
             return ChatColor.translateAlternateColorCodes('&', format.replace("<text>", text));
         }
