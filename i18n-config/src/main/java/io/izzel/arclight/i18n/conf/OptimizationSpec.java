@@ -27,12 +27,19 @@ public class OptimizationSpec {
     @Setting("spawn")
     private SpawnSpec spawn = new SpawnSpec();
 
+    @Setting("chunks")
+    private ChunkSpec chunks = new ChunkSpec();
+
     public boolean useActivationAndTrackingRange() {
         return useActivationAndTrackingRange;
     }
 
     public SpawnSpec getSpawn() {
         return spawn != null ? spawn : new SpawnSpec();
+    }
+
+    public ChunkSpec getChunks() {
+        return chunks != null ? chunks : new ChunkSpec();
     }
 
     public boolean isCachePluginClass() {

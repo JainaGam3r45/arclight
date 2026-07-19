@@ -9,6 +9,8 @@ import io.izzel.arclight.common.mod.ArclightConstants;
 import io.izzel.arclight.common.mod.server.BukkitRegistry;
 import io.izzel.arclight.common.mod.server.PerformanceBarManager;
 import io.izzel.arclight.common.mod.server.DropManager;
+import io.izzel.arclight.common.mod.server.TargetPathAssist;
+import io.izzel.arclight.common.mod.server.chunk.ChunkWorkloadManager;
 import io.izzel.arclight.common.mod.util.ArclightCaptures;
 import io.izzel.arclight.common.mod.util.BukkitOptionParser;
 import it.unimi.dsi.fastutil.longs.LongIterator;
@@ -107,7 +109,6 @@ public abstract class MinecraftServerMixin extends ReentrantBlockableEventLoop<T
     @Shadow private long lastOverloadWarning;
     @Shadow @Final static Logger LOGGER;
     @Shadow public abstract void tickServer(BooleanSupplier hasTimeLeft);
-    @Shadow protected abstract boolean haveTime();
     @Shadow private boolean mayHaveDelayedTasks;
     @Shadow private long delayedTasksMaxNextTickTime;
     @Shadow protected abstract void waitUntilNextTick();
@@ -253,9 +254,15 @@ public abstract class MinecraftServerMixin extends ReentrantBlockableEventLoop<T
                 this.nextTickTime += 50L;
                 this.startMetricsRecordingTick();
                 this.profiler.push("tick");
-                this.tickServer(this::haveTime);
-                PerformanceBarManager.tick((MinecraftServer) (Object) this);
-                DropManager.tick((MinecraftServer) (Object) this);
+                ChunkWorkloadManager.beginServerTick((MinecraftServer) (Object) this);
+                try {
+                    this.tickServer(this::haveTime);
+                    PerformanceBarManager.tick((MinecraftServer) (Object) this);
+                    DropManager.tick((MinecraftServer) (Object) this);
+                    TargetPathAssist.tick((MinecraftServer) (Object) this);
+                } finally {
+                    ChunkWorkloadManager.endServerTick();
+                }
                 this.profiler.popPush("nextTickWait");
                 this.mayHaveDelayedTasks = true;
                 this.delayedTasksMaxNextTickTime = Math.max(Util.getMillis() + 50L, this.nextTickTime);
@@ -342,9 +349,16 @@ public abstract class MinecraftServerMixin extends ReentrantBlockableEventLoop<T
         }
     }
 
-    @Inject(method = "haveTime", cancellable = true, at = @At("HEAD"))
-    private void arclight$forceAheadOfTime(CallbackInfoReturnable<Boolean> cir) {
-        if (this.forceTicks) cir.setReturnValue(true);
+    /**
+     * @author IzzelAliz
+     * @reason Honor forceTicks during prepareLevels without CallbackInfoReturnable on the hot path.
+     */
+    @Overwrite
+    private boolean haveTime() {
+        if (this.forceTicks) {
+            return true;
+        }
+        return this.runningTask() || Util.getMillis() < (this.mayHaveDelayedTasks ? this.delayedTasksMaxNextTickTime : this.nextTickTime);
     }
 
     @Inject(method = "createLevels", at = @At(value = "NEW", ordinal = 0, target = "net/minecraft/server/level/ServerLevel"))

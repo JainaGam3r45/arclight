@@ -122,6 +122,15 @@ public abstract class LevelMixin implements WorldBridge, LevelWriter {
         return this.ticksPerSpawnCategory;
     }
 
+    @Override
+    public void bridge$refreshTicksPerSpawn() {
+        for (SpawnCategory spawnCategory : SpawnCategory.values()) {
+            if (CraftSpawnCategory.isValidForLimits(spawnCategory)) {
+                this.ticksPerSpawnCategory.put(spawnCategory, this.getCraftServer().getTicksPerSpawns(spawnCategory));
+            }
+        }
+    }
+
     public abstract ResourceKey<LevelStem> getTypeKey();
 
     @Override

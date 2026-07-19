@@ -24,7 +24,7 @@ public abstract class ServerChunkCache_MainThreadExecutorMixin extends Blockable
 
     /**
      * @author IzzelAliz
-     * @reason
+     * @reason Drain Arclight callbacks. Do not budget-gate pollTask: managedBlock/getChunk waits on it.
      */
     @Overwrite
     public boolean pollTask() {

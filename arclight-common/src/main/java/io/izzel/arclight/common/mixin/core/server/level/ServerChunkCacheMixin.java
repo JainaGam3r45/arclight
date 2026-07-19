@@ -5,12 +5,15 @@ import io.izzel.arclight.common.bridge.core.world.server.ChunkHolderBridge;
 import io.izzel.arclight.common.bridge.core.world.server.ChunkMapBridge;
 import io.izzel.arclight.common.bridge.core.world.server.ServerChunkProviderBridge;
 import io.izzel.arclight.common.bridge.core.world.server.TicketManagerBridge;
+import io.izzel.arclight.common.mod.server.chunk.ChunkWorkloadManager;
 import io.izzel.arclight.common.mod.server.spawn.EntityGenerationManager;
 import net.minecraft.server.level.*;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.GameRules;
 import net.minecraft.world.level.NaturalSpawner;
+import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.ChunkGenerator;
+import net.minecraft.world.level.chunk.ChunkStatus;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.storage.LevelData;
 import org.bukkit.entity.SpawnCategory;
@@ -24,6 +27,7 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
@@ -87,6 +91,29 @@ public abstract class ServerChunkCacheMixin implements ServerChunkProviderBridge
         }
     }
 
+    /**
+     * Before a blocking getChunk wait, flush deferred schedules so pollTask can finish the chunk (anti-Watchdog).
+     */
+    @Inject(method = "getChunk(IILnet/minecraft/world/level/chunk/ChunkStatus;Z)Lnet/minecraft/world/level/chunk/ChunkAccess;",
+        at = @At("HEAD"))
+    private void arclight$ensureChunkProgress(int chunkX, int chunkZ, ChunkStatus status, boolean load,
+                                              CallbackInfoReturnable<ChunkAccess> cir) {
+        if (!load) {
+            return;
+        }
+        ChunkWorkloadManager.pushBlocking();
+        ChunkWorkloadManager.ensureProgress(ChunkPos.asLong(chunkX, chunkZ));
+    }
+
+    @Inject(method = "getChunk(IILnet/minecraft/world/level/chunk/ChunkStatus;Z)Lnet/minecraft/world/level/chunk/ChunkAccess;",
+        at = @At("RETURN"))
+    private void arclight$releaseChunkProgress(int chunkX, int chunkZ, ChunkStatus status, boolean load,
+                                               CallbackInfoReturnable<ChunkAccess> cir) {
+        if (load) {
+            ChunkWorkloadManager.popBlocking();
+        }
+    }
+
     @Redirect(method = "tickChunks", at = @At(value = "INVOKE", target = "Lnet/minecraft/world/level/GameRules;getBoolean(Lnet/minecraft/world/level/GameRules$Key;)Z"))
     private boolean arclight$noPlayer(GameRules gameRules, GameRules.Key<GameRules.BooleanValue> key) {
         return gameRules.getBoolean(key) && !this.level.players().isEmpty();
@@ -111,8 +138,14 @@ public abstract class ServerChunkCacheMixin implements ServerChunkProviderBridge
 
     @Redirect(method = "tickChunks", at = @At(value = "INVOKE", target = "Lnet/minecraft/world/level/NaturalSpawner;spawnForChunk(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/world/level/chunk/LevelChunk;Lnet/minecraft/world/level/NaturalSpawner$SpawnState;ZZZ)V"))
     private void arclight$budgetedNaturalSpawn(ServerLevel level, LevelChunk chunk, NaturalSpawner.SpawnState state, boolean friendly, boolean hostile, boolean rare) {
-        if (EntityGenerationManager.tryConsumeNaturalSpawn(level, chunk)) {
+        if (!EntityGenerationManager.tryConsumeNaturalSpawn(level, chunk)) {
+            return;
+        }
+        long started = System.nanoTime();
+        try {
             NaturalSpawner.spawnForChunk(level, chunk, state, friendly, hostile, rare);
+        } finally {
+            EntityGenerationManager.recordSpawnWork(System.nanoTime() - started);
         }
     }
 
