@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.mojang.authlib.properties.Property;
 import com.mojang.util.UUIDTypeAdapter;
 import io.izzel.arclight.common.bridge.core.network.NetworkManagerBridge;
+import io.izzel.arclight.common.mod.server.proxy.VelocityModernForwarding;
 import net.minecraft.SharedConstants;
 import net.minecraft.network.Connection;
 import net.minecraft.network.ConnectionProtocol;
@@ -93,7 +94,11 @@ public class ServerHandshakeNetHandlerMixin {
                 this.connection.setListener(new ServerLoginPacketListenerImpl(this.server, this.connection));
 
 
-                if (SpigotConfig.bungee) {
+                if (VelocityModernForwarding.isEnabled()) {
+                    if (SpigotConfig.bungee) {
+                        LogManager.getLogger("Arclight").warn("Velocity modern forwarding is enabled; ignoring settings.bungeecord (leave bungeecord=false in spigot.yml)");
+                    }
+                } else if (SpigotConfig.bungee) {
                     String[] split = packetIn.hostName.split("\00");
                     if (split.length == 3 || split.length == 4) {
                         packetIn.hostName = split[0];

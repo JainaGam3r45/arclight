@@ -5,16 +5,20 @@ import com.mojang.authlib.properties.Property;
 import io.izzel.arclight.common.bridge.core.network.NetworkManagerBridge;
 import io.izzel.arclight.common.bridge.core.server.MinecraftServerBridge;
 import io.izzel.arclight.common.bridge.core.server.management.PlayerListBridge;
+import io.izzel.arclight.common.mod.server.proxy.VelocityModernForwarding;
 import io.izzel.arclight.i18n.ArclightConfig;
 import net.minecraft.DefaultUncaughtExceptionHandler;
 import net.minecraft.core.UUIDUtil;
 import net.minecraft.network.Connection;
+import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.PacketSendListener;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundDisconnectPacket;
+import net.minecraft.network.protocol.login.ClientboundCustomQueryPacket;
 import net.minecraft.network.protocol.login.ClientboundGameProfilePacket;
 import net.minecraft.network.protocol.login.ClientboundHelloPacket;
 import net.minecraft.network.protocol.login.ClientboundLoginCompressionPacket;
+import net.minecraft.network.protocol.login.ServerboundCustomQueryPacket;
 import net.minecraft.network.protocol.login.ServerboundHelloPacket;
 import net.minecraft.network.protocol.login.ServerboundKeyPacket;
 import net.minecraft.server.MinecraftServer;
@@ -34,6 +38,7 @@ import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.Unique;
 
 import javax.annotation.Nullable;
 import javax.crypto.Cipher;
@@ -44,6 +49,7 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.security.PrivateKey;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static net.minecraft.server.network.ServerLoginPacketListenerImpl.isValidUsername;
@@ -64,6 +70,9 @@ public abstract class ServerLoginNetHandlerMixin {
     @Shadow private ServerPlayer delayedAcceptPlayer;
     @Shadow @Final private byte[] challenge;
     // @formatter:on
+
+    @Unique
+    private int arclight$velocityLoginMessageId = -1;
 
     public void disconnect(final String s) {
         this.disconnect(Component.literal(s));
@@ -139,6 +148,8 @@ public abstract class ServerLoginNetHandlerMixin {
             if (this.server.usesAuthentication() && !this.connection.isMemoryConnection()) {
                 this.state = ServerLoginPacketListenerImpl.State.KEY;
                 this.connection.send(new ClientboundHelloPacket("", this.server.getKeyPair().getPublic().getEncoded(), this.challenge));
+            } else if (arclight$tryVelocityForwarding()) {
+                // Waiting for Velocity modern forwarding response
             } else {
                 class Handler extends Thread {
 
@@ -160,6 +171,87 @@ public abstract class ServerLoginNetHandlerMixin {
                 new Handler().start();
             }
         }
+    }
+
+    @Unique
+    private boolean arclight$tryVelocityForwarding() {
+        var velocity = VelocityModernForwarding.config();
+        if (!velocity.isConfiguredEnabled()) {
+            return false;
+        }
+        if (!velocity.isEnabled()) {
+            LOGGER.error("Velocity modern forwarding is enabled but secret is empty; ignoring velocity config");
+            return false;
+        }
+        this.arclight$velocityLoginMessageId = ThreadLocalRandom.current().nextInt();
+        this.connection.send(new ClientboundCustomQueryPacket(
+            this.arclight$velocityLoginMessageId,
+            VelocityModernForwarding.PLAYER_INFO_CHANNEL,
+            VelocityModernForwarding.createForwardingRequest()
+        ));
+        return true;
+    }
+
+    /**
+     * @author Arclight
+     * @reason Velocity modern player-info forwarding
+     */
+    @Overwrite
+    public void handleCustomQueryPacket(ServerboundCustomQueryPacket packet) {
+        if (VelocityModernForwarding.isEnabled() && packet.getTransactionId() == this.arclight$velocityLoginMessageId) {
+            FriendlyByteBuf payload = packet.getData();
+            if (payload == null) {
+                this.disconnect("This server requires you to connect through Velocity.");
+                return;
+            }
+            try {
+                if (!VelocityModernForwarding.checkIntegrity(payload, VelocityModernForwarding.config().getSecret())) {
+                    this.disconnect("Unable to verify player details");
+                    return;
+                }
+                int version = payload.readVarInt();
+                if (version > VelocityModernForwarding.MAX_SUPPORTED_FORWARDING_VERSION) {
+                    throw new IllegalStateException("Unsupported forwarding version " + version
+                        + ", supported up to " + VelocityModernForwarding.MAX_SUPPORTED_FORWARDING_VERSION
+                        + " (" + VelocityModernForwarding.describeSupportedVersions() + ")");
+                }
+
+                SocketAddress listening = this.connection.getRemoteAddress();
+                int port = listening instanceof InetSocketAddress inet ? inet.getPort() : 0;
+                this.connection.address = new InetSocketAddress(VelocityModernForwarding.readAddress(payload), port);
+
+                GameProfile forwarded = VelocityModernForwarding.readProfile(payload);
+                VelocityModernForwarding.skipKeyData(payload, version);
+
+                ((NetworkManagerBridge) this.connection).bridge$setSpoofedUUID(forwarded.getId());
+                ((NetworkManagerBridge) this.connection).bridge$setSpoofedProfile(
+                    forwarded.getProperties().values().toArray(new Property[0])
+                );
+                this.gameProfile = forwarded;
+
+                class VelocityHandler extends Thread {
+                    VelocityHandler() {
+                        super(SidedThreadGroups.SERVER, "User Authenticator #" + UNIQUE_THREAD_ID.incrementAndGet());
+                    }
+
+                    @Override
+                    public void run() {
+                        try {
+                            arclight$preLogin();
+                        } catch (Exception ex) {
+                            disconnect("Failed to verify username!");
+                            LOGGER.warn("Exception verifying {} ", gameProfile.getName(), ex);
+                        }
+                    }
+                }
+                new VelocityHandler().start();
+            } catch (Exception ex) {
+                LOGGER.warn("Velocity forwarding failed for {}", this.getUserName(), ex);
+                this.disconnect("Unable to verify player details");
+            }
+            return;
+        }
+        this.disconnect(Component.translatable("multiplayer.disconnect.unexpected_query_response"));
     }
 
     public void initUUID() {
@@ -253,6 +345,10 @@ public abstract class ServerLoginNetHandlerMixin {
     }
 
     void arclight$preLogin() throws Exception {
+        if (this.arclight$velocityLoginMessageId == -1 && VelocityModernForwarding.isEnabled()) {
+            this.disconnect("This server requires you to connect through Velocity.");
+            return;
+        }
         String playerName = gameProfile.getName();
         InetAddress address = ((InetSocketAddress) connection.getRemoteAddress()).getAddress();
         UUID uniqueId = gameProfile.getId();
