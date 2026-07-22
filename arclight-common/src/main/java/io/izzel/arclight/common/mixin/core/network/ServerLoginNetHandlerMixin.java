@@ -39,6 +39,9 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import javax.annotation.Nullable;
 import javax.crypto.Cipher;
@@ -193,65 +196,65 @@ public abstract class ServerLoginNetHandlerMixin {
     }
 
     /**
-     * @author Arclight
-     * @reason Velocity modern player-info forwarding
+     * Velocity modern player-info forwarding. Cancel only for our transaction id;
+     * otherwise fall through to Forge NetworkHooks.onCustomPayload (FML login).
      */
-    @Overwrite
-    public void handleCustomQueryPacket(ServerboundCustomQueryPacket packet) {
-        if (VelocityModernForwarding.isEnabled() && packet.getTransactionId() == this.arclight$velocityLoginMessageId) {
-            FriendlyByteBuf payload = packet.getData();
-            if (payload == null) {
-                this.disconnect("This server requires you to connect through Velocity.");
-                return;
-            }
-            try {
-                if (!VelocityModernForwarding.checkIntegrity(payload, VelocityModernForwarding.config().getSecret())) {
-                    this.disconnect("Unable to verify player details");
-                    return;
-                }
-                int version = payload.readVarInt();
-                if (version > VelocityModernForwarding.MAX_SUPPORTED_FORWARDING_VERSION) {
-                    throw new IllegalStateException("Unsupported forwarding version " + version
-                        + ", supported up to " + VelocityModernForwarding.MAX_SUPPORTED_FORWARDING_VERSION
-                        + " (" + VelocityModernForwarding.describeSupportedVersions() + ")");
-                }
-
-                SocketAddress listening = this.connection.getRemoteAddress();
-                int port = listening instanceof InetSocketAddress inet ? inet.getPort() : 0;
-                this.connection.address = new InetSocketAddress(VelocityModernForwarding.readAddress(payload), port);
-
-                GameProfile forwarded = VelocityModernForwarding.readProfile(payload);
-                VelocityModernForwarding.skipKeyData(payload, version);
-
-                ((NetworkManagerBridge) this.connection).bridge$setSpoofedUUID(forwarded.getId());
-                ((NetworkManagerBridge) this.connection).bridge$setSpoofedProfile(
-                    forwarded.getProperties().values().toArray(new Property[0])
-                );
-                this.gameProfile = forwarded;
-
-                class VelocityHandler extends Thread {
-                    VelocityHandler() {
-                        super(SidedThreadGroups.SERVER, "User Authenticator #" + UNIQUE_THREAD_ID.incrementAndGet());
-                    }
-
-                    @Override
-                    public void run() {
-                        try {
-                            arclight$preLogin();
-                        } catch (Exception ex) {
-                            disconnect("Failed to verify username!");
-                            LOGGER.warn("Exception verifying {} ", gameProfile.getName(), ex);
-                        }
-                    }
-                }
-                new VelocityHandler().start();
-            } catch (Exception ex) {
-                LOGGER.warn("Velocity forwarding failed for {}", this.getUserName(), ex);
-                this.disconnect("Unable to verify player details");
-            }
+    @Inject(method = "handleCustomQueryPacket", at = @At("HEAD"), cancellable = true)
+    private void arclight$handleVelocityCustomQuery(ServerboundCustomQueryPacket packet, CallbackInfo ci) {
+        if (!VelocityModernForwarding.isEnabled() || packet.getTransactionId() != this.arclight$velocityLoginMessageId) {
             return;
         }
-        this.disconnect(Component.translatable("multiplayer.disconnect.unexpected_query_response"));
+        ci.cancel();
+        FriendlyByteBuf payload = packet.getData();
+        if (payload == null) {
+            this.disconnect("This server requires you to connect through Velocity.");
+            return;
+        }
+        try {
+            if (!VelocityModernForwarding.checkIntegrity(payload, VelocityModernForwarding.config().getSecret())) {
+                this.disconnect("Unable to verify player details");
+                return;
+            }
+            int version = payload.readVarInt();
+            if (version > VelocityModernForwarding.MAX_SUPPORTED_FORWARDING_VERSION) {
+                throw new IllegalStateException("Unsupported forwarding version " + version
+                    + ", supported up to " + VelocityModernForwarding.MAX_SUPPORTED_FORWARDING_VERSION
+                    + " (" + VelocityModernForwarding.describeSupportedVersions() + ")");
+            }
+
+            SocketAddress listening = this.connection.getRemoteAddress();
+            int port = listening instanceof InetSocketAddress inet ? inet.getPort() : 0;
+            this.connection.address = new InetSocketAddress(VelocityModernForwarding.readAddress(payload), port);
+
+            GameProfile forwarded = VelocityModernForwarding.readProfile(payload);
+            VelocityModernForwarding.skipKeyData(payload, version);
+
+            ((NetworkManagerBridge) this.connection).bridge$setSpoofedUUID(forwarded.getId());
+            ((NetworkManagerBridge) this.connection).bridge$setSpoofedProfile(
+                forwarded.getProperties().values().toArray(new Property[0])
+            );
+            this.gameProfile = forwarded;
+
+            class VelocityHandler extends Thread {
+                VelocityHandler() {
+                    super(SidedThreadGroups.SERVER, "User Authenticator #" + UNIQUE_THREAD_ID.incrementAndGet());
+                }
+
+                @Override
+                public void run() {
+                    try {
+                        arclight$preLogin();
+                    } catch (Exception ex) {
+                        disconnect("Failed to verify username!");
+                        LOGGER.warn("Exception verifying {} ", gameProfile.getName(), ex);
+                    }
+                }
+            }
+            new VelocityHandler().start();
+        } catch (Exception ex) {
+            LOGGER.warn("Velocity forwarding failed for {}", this.getUserName(), ex);
+            this.disconnect("Unable to verify player details");
+        }
     }
 
     public void initUUID() {
