@@ -13,4 +13,13 @@ repositories {
 dependencies {
     implementation 'org.spongepowered:configurate-hocon:3.6.1'
     implementation 'org.spongepowered:configurate-yaml:3.6.1'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+}
+
+test {
+    useJUnitPlatform()
+    workingDir = file("$buildDir/tmp/test-workdir")
+    doFirst {
+        workingDir.mkdirs()
+    }
 }
